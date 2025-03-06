@@ -1,0 +1,458 @@
+ *********************************************************;
+ ************* Airbnb Data Analysis, Albany, NY***********;
+ **************BIDYA BHATTARAI****************************;
+ 
+/**Import the data*****/ 
+ 
+ proc import datafile="/home/u63735374/Airbnb/listing.xlsx"
+             OUT=Listings.listings 
+             DBMS=xlsx 
+             Replace;
+             GETNAMES=YES;
+    run;
+       
+
+proc contents DATA=Listings.listings ;
+run;
+
+/*********Investigate the dependent/response/target variable*****/
+ 
+ proc univariate Data=Listings.listings ;
+                VAR price;
+                histogram;
+     run;
+              
+/****** Removing Outliers and create log transformed price variable ****/
+ 
+ Data Price;
+      Set Listings.listings;
+      where 36.5 le Price le 538.5;
+      Price_Log = Log(Price); /*It normally distributed the data*/
+  run;
+      
+ proc contents DATA=Price ;
+run;
+
+
+Proc Univariate DATA=Price ;
+        VAR Price_Log;
+                histogram;
+run;
+
+
+/*** Predictor variable analysis ****/
+/*****Numerical variable analysis*****/
+
+
+  Proc Means DATA=Price (KEEP = _NUMERIC_) N NMISS MIN MAX MEAN MEDIAN STD;
+  run;
+ 
+/*** Finding Multicollinearity ***/
+/**Place all variables names into a Macro Variable****/
+/**Create global numeric variables ***/
+
+ Proc Contents Noprint DATA=Price (Keep = _Numeric_ Drop=id host_id latitude longitude Price Price_Log)  
+                      Out=var1 (Keep=name);
+                     run;  
+ Proc SQL NOPRINT;
+      select name INTO:varx separated by " " From var1;
+ Quit;
+ 
+ %Put &varx;
+ 
+ Proc means DATA=price;
+         VAR &varx;
+         RUN;
+           
+            
+ /*Create Correlation Analysis**/
+
+ Proc Corr DATA=Price;
+     Var &varx.;
+     run;
+  
+/** fit a regression model by using VIF ***/
+/**Checking with variable Price_log*****/
+
+  PROC REG DATA=PRICE PLOTS=ALL;
+           MODEL Price_Log= &varx / 
+           selection=forward VIF COLLIN;
+        RUN;
+        
+/*** Checking for the variable price only to compare with variable price_log**/
+
+  PROC REG DATA=PRICE PLOTS=ALL;
+           MODEL Price= &varx / 
+           selection=forward VIF COLLIN;
+        RUN;     
+   
+ /**Place all variables names into a Macro Variable****/
+/**Create global CATEGORICAL variables ***/
+
+ Proc Contents Noprint DATA=Price (Keep = _Character_ DROP=Amenities description host_about host_has_profile_pic 
+                       host_name host_neighbourhood host_picture_url host_response_time host_thumbnail_url host_url
+                       license listing_url name neighborhood_overview neighbourhood_cleansed neighbourhood_group_cleansed 
+                       picture_url source)
+                 Out=var2;
+                     run;  
+                     
+ Proc SQL NOPRINT;
+      select name INTO:vary separated by " " From var2;
+ Quit;
+ 
+ %Put &vary;
+ 
+ PROC FREQ DATA=PRICE;
+      TABLE &vary;
+ RUN;
+ 
+ 
+ 
+/***Categorization****/
+/**** collapsing categorical levels.***/
+
+/* Step 1: Evaluate the initial distribution using PROC FREQ */
+proc freq data=Price;
+    tables bathrooms_text;
+run;
+
+/* Step 2: Use IF-ELSE IF to collapse bathrooms_text categories with similar counts */
+ DATA Price_new;
+      SET PRICE;
+
+    /* Collapse bathrooms_text based on comparable counts */
+    if bathrooms_text in ('0 shared baths', '1 bath', '1 shared bath', '1 private bath') then
+        Bathrooms_Collapsed = '1 bath or less';
+    else if bathrooms_text in ('1.5 baths', '1.5 shared baths', '2 baths', '2 shared baths') then
+        Bathrooms_Collapsed = '1.5 to 2 baths';
+    else if bathrooms_text in ('2.5 baths', '2.5 shared baths', '3 baths', '3 shared baths') then
+        Bathrooms_Collapsed = '2.5 to 3 baths';
+    else if bathrooms_text in ('3.5 baths', '4 baths', '4 shared baths') then
+        Bathrooms_Collapsed = '3.5 to 4 baths';
+    else if bathrooms_text in ('5 baths', '5.5 baths') then
+        Bathrooms_Collapsed = '5 to 5.5 baths';
+    else if bathrooms_text in ('6 baths', '7 baths') then
+        Bathrooms_Collapsed = '6 baths or more';
+    else 
+        Bathrooms_Collapsed = 'Other';
+run;
+
+/* Step 3: Check the frequency of the new collapsed categories to ensure balanced counts */
+proc freq data=Price_new;
+    tables Bathrooms_Collapsed;
+run;
+
+/* Collapsing levels of property_type into broader categories */
+data Price_new2;
+    set Price_new;
+    if property_type in ('Entire condo', 'Entire guest suite', 'Entire guesthouse', 'Entire loft', 
+                         'Entire place', 'Entire rental unit', 'Entire serviced apartment', 
+                         'Entire townhouse', 'Entire vacation home') then property_type_new = 'Entire Unit';
+    else if property_type in ('Private room in bed and breakfast', 'Private room in guest suite', 
+                              'Private room in home', 'Private room in rental unit', 
+                              'Private room in townhouse') then property_type_cat = 'Private Room';
+    else if property_type = 'Room in hotel' then property_type_new = 'Hotel Room';
+    else if property_type in ('Shared room in rental unit') then property_type_new = 'Shared Room';
+    else property_type_new = 'Other';
+run;
+
+/* Checking frequencies of the new collapsed category */
+proc freq data=Price_new2;
+    tables property_type_new;
+run;
+
+Proc contents DATA=PRICE_new2;
+RUN;
+
+/***Creating feature-engineered variables based on current variables***/
+
+data Price_Featured;
+    set PRICE_new2;
+
+    /* Create beds_per_accommodate and bath_per_accommodate as new features */
+   /**This will find the ratio of guests to beds, indicating how many guests each bed serves.**/
+   
+   if beds not in (., 0) then beds_per_accom = accomodates / beds;
+   else beds_per_accom = 0;
+    
+ /**This will find the ratio of guests to bathrooms, showing the number of guests per bathroom.**/
+
+   if bathroom not in (., 0) then baths_per_accom = accomodates / bathrooms;
+   else bath_per_accom = 0; 
+   
+ /* Create polynomial features to capture non-linear relationships */
+/**this will capture the complexity of customer behavior or property characteristics that may not follow a linear trend**/ 
+
+    poly_accom = accommodates**2;
+    poly_bath = bathrooms**2;
+    poly_availability = availability_30**2;
+    poly_min_night = minimum_minimum_nights**2;
+    poly_max_night = maximum_maximum_nights**2;
+
+
+    /* Log transform the price variable for normalization */
+    where 36.5 le Price le 538.5;
+    Price_Log = log(Price);
+run;
+
+/* Checking the results of the transformations */
+proc contents data=Price_Featured;
+run;
+
+/****Spliting data into train and test samples by using 80/20 ratio****/
+/**Randomly sample 20% of the data as the test set**/
+
+ PROC SURVEYSELECT DATA = Price_Featured SAMPRATE=0.20 SEED=50
+                   OUT=split_data OUTALL METHOD=SRS;
+               run;    
+                   
+ /**Assigning train and test labels****/     
+
+  DATA TRAIN_DATA TEST_DATA;
+       SET split_data;
+           IF Selected=0 THEN OUTPUT TRAIN_DATA; /***Training data 80%***/
+           ELSE OUTPUT TEST_DATA; /***Testing data 20%***/
+        DROP Selected ;
+         run;
+         
+ 
+ /***Check the distribution***/
+
+  PROC FREQ DATA=split_data;
+           Tables Selected;
+           run;
+ 
+ PROC UNIVARIATE DATA=TRAIN_DATA;
+                 VAR PRICE;
+     RUN;
+ 
+ 
+ /*****Fit a regression model using PROC GLMSELECT and LASSO selection****/
+ /*********** GLM regression model ********/
+******************************************;
+/** Creatye macro variables for the predictors***/
+
+  %let lasso_var = accommodates bathrooms number_of_reviews_l30d calculated_host_listings_count 
+                 review_scores_rating review_scores_value review_scores_communication 
+                 beds availability_30 last_review maximum_nights review_scores_cleanliness;
+                
+
+ %let k=10;
+ 
+ 
+/***Enable ODS Graphics for visualization ****/
+
+  ODS GRAPHICS on;
+  
+/** Fit the lasso regression model and check on Price variable **/
+  
+ PROC GLMSELECT DATA=TRAIN_DATA
+      OUTDESIGN(ADDINPUTVARS)=WORK.price_design
+      PLOTS=ALL;
+      MODEL Price=&lasso_var. / selection=lasso (stop=&k choose=SBC);
+      OUTPUT OUT = Train_score;
+      score DATA=TEST_DATA PREDICTED RESIDUAL OUT=Test_scorep;
+      run;
+      
+  ODS GRAPHICS OFF;
+  
+  
+/* Calculate RMSE for the TEST dataset on Price */
+DATA eval_price;
+    SET Test_scorep;
+    residual_price = (p_price - price)**2;
+RUN;
+
+PROC MEANS DATA=eval_price N MEAN;
+    VAR residual_price;
+    OUTPUT OUT=rmse_price_results (KEEP=RMSE_Price) MEAN(residual_price)=rmse_price;
+RUN;
+  
+ 
+ /**Fit the model on Price log transformed variable ***/
+
+ PROC GLMSELECT DATA=TRAIN_DATA
+      OUTDESIGN(ADDINPUTVARS)=WORK.price_design
+      PLOTS=ALL;
+      MODEL Price_log=&lasso_var. / selection=lasso (stop=&k choose=SBC);
+      OUTPUT OUT = Train_score;
+      score DATA=TEST_DATA PREDICTED RESIDUAL OUT=Test_score_Pricelog;
+      run;
+      
+  ODS GRAPHICS OFF;
+  
+  
+/* Calculate RMSE for the TEST dataset on Price log */
+DATA eval_price_lg;
+    SET Test_score_Pricelog;
+    residual_price = (p_price_log - price_log)**2;
+RUN;
+
+PROC MEANS DATA=eval_price N MEAN;
+    VAR residual_price;
+    OUTPUT OUT=rmse_price_results (KEEP=RMSE_Price) MEAN(residual_price)=rmse_price;
+RUN;
+  
+  
+  
+********************************************************************************************************************************************************************;
+/******************* Create Decision Tree Model using PROC HPSPLIT *******************/
+
+DATA Train_Data_Cleaned; /* Create a new dataset without unwanted variables */
+    SET TRAIN_DATA;
+    DROP Amenities description host_about neighborhood_overview; /* Drop unwanted variables */
+RUN;
+
+/**Create Decision Tree Model using PROC HPSPLIT for Price **/
+
+PROC HPSPLIT DATA=Train_Data_Cleaned SEED=50;
+   CLASS room_type property_type;
+   MODEL price = accommodates bathrooms number_of_reviews review_scores_rating
+                   review_scores_value beds availability_30 last_review 
+                   minimum_nights maximum_nights review_scores_cleanliness room_type property_type;
+   OUTPUT OUT=Train_Scored;  /* Creates a scored dataset */
+   CODE FILE='/home/u63735374/Airbnb/Airbnb_DA.sas';
+RUN;
+
+/** Apply the scoring code to the test set **/
+
+DATA Test_new_dt;
+   SET TEST_DATA;
+   %INCLUDE '/home/u63735374/Airbnb/Airbnb_DA.sas';
+RUN;
+
+/* Calculate RMSE for the TEST dataset on Price */
+DATA eval_tree_price;
+    SET Test_new_dt;
+    residual_price = (p_Price - Price)**2;
+RUN;
+
+PROC MEANS DATA=eval_tree_price N MEAN;
+    VAR residual_price;
+    OUTPUT OUT=rmse_tree_price_results (KEEP=RMSE_Price) MEAN(residual_price)=rmse_price;
+RUN;
+
+/**Create Decision Tree Model using PROC HPSPLIT for Price log**/
+
+PROC HPSPLIT DATA=Train_Data_Cleaned SEED=50;
+   CLASS room_type property_type;
+   MODEL Price_log = accommodates bathrooms number_of_reviews review_scores_rating
+                   review_scores_value beds availability_30 last_review 
+                   minimum_nights maximum_nights review_scores_cleanliness room_type property_type;
+   OUTPUT OUT=Train_Scored;  /* Creates a scored dataset */
+   CODE FILE='/home/u63735374/Airbnb/Airbnb_DA.sas';
+RUN;
+
+/** Apply the scoring code to the test set for Price_log **/
+
+DATA Test_Pricelog_dt;
+   SET TEST_DATA;
+   %INCLUDE '/home/u63735374/Airbnb/Airbnb_DA.sas';
+RUN;
+
+/* Calculate RMSE for the TEST dataset on Price log */
+DATA eval_price_dtlog;
+    SET Test_Pricelog_dt;
+    residual_price = (P_Price_log - Price_log)**2;
+RUN;
+
+PROC MEANS DATA=eval_price_dtlog N MEAN;
+    VAR residual_price;
+    OUTPUT OUT=rmse_tree_price_results (KEEP=RMSE_Price) MEAN(residual_price)=rmse_price;
+RUN;
+
+
+****************************************************;
+/** Fit a random forest model using the PROC HPFOREST procedure using price as the target variable ***/
+
+ Proc Contents NOPRINT DATA=train_data (KEEP=_NUMERIC_ DROP=id host_id latitude longitude Price Price_Log)
+          OUT=VAR3 (KEEP=NAME);
+          RUN;
+ 
+ PROC SQL NOPRINT;
+          SELECT name INTO:var_num Separated by " " from var3;
+     quit;
+     
+   %put &var_num;
+      
+/**Macro variable for character variables ***/
+
+ Proc Contents NOPRINT DATA=train_data (KEEP=_CHARACTER_ 
+          DROP=Amenities description host_about neighborhood_overview)
+          OUT=VAR4 (KEEP=NAME);
+          RUN;
+ 
+ PROC SQL NOPRINT;
+          SELECT name INTO:var_char Separated by " " from var4;
+     quit;
+  
+   
+   %put &var_char;
+   
+/* Save the model scoring code for Price */
+ PROC HPFOREST DATA=Train_Data_Cleaned
+        MAXTREES=400 VARS_TO_TRY=5
+        SEED=50
+        TRAINFRACTION=0.7
+        MAXDEPTH=20
+        LEAFSIZE=7
+        ALPHA=0.1;
+        TARGET Price/ level=interval;
+        input &var_num. / level=interval;
+       input &var_char. / level=nominal;
+       ods output train_scored_new fitstatistics = fit;
+       save file = '/home/u63735374/Airbnb/price_model.sas';;
+       run;
+ 
+ /* Score the test data with the Price model */
+PROC HP4SCORE DATA=Test_Data;
+    SCORE FILE='/home/u63735374/Airbnb/price_model.sas'
+    OUT=Test_Price_rf;
+RUN;
+
+ /* Calculate RMSE for the Price model */
+DATA Eval_Price_rf;
+    SET Test_Price_rf;
+    residual = (p_Price - Price)**2;
+RUN;
+
+PROC MEANS DATA=Eval_Price_rf N MEAN;
+    VAR residual;
+    OUTPUT OUT=Price_RMSE MEAN=RMSE;
+RUN;
+ 
+ /* Save the model scoring code for Price_Log */
+
+PROC HPFOREST DATA=Train_Data_Cleaned;
+    TARGET Price_Log / level=interval;
+    INPUT &var_num / level=interval;
+    INPUT &var_char / level=nominal;
+    SAVE FILE='/home/u63735374/Airbnb/price_log_model.sas';
+RUN;
+
+
+/* Score the test data with the Price_Log model */
+PROC HP4SCORE DATA=Test_Data;
+    SCORE FILE='/home/u63735374/Airbnb/price_log_model.sas'
+    OUT=Test_PriceLog_rf;
+RUN;
+   
+   
+/* Calculate RMSE for the Price_Log model */
+DATA Eval_PriceLog_rf;
+    SET Test_PriceLog_rf;
+    residual = (P_Price_Log - Price_Log)**2;
+RUN;
+
+PROC MEANS DATA=Eval_PriceLog_rf N MEAN;
+    VAR residual;
+    OUTPUT OUT=PriceLog_RMSE MEAN=RMSE;
+RUN;
+
+
+**********************************************************************************************;
+
+
+   
+
+
